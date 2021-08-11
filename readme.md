@@ -12,6 +12,14 @@ $ npm install normalize-url
 
 *If you need to use this in the browser, use version 4: `npm i normalize-url@4`*
 
+*There are two ways if you want to test version >= 7.0.0 in real browser,
+
+1. git clone then visit [browser-test/index.html](browser-test/index.html)
+2. Zero install using [rawgit](https://ghcdn.rawgit.org).
+```txt
+https://ghcdn.rawgit.org/loynoir/normalize-url/<LAST_COMMIT_HASH>/browser-test/index.html
+```
+
 ## Usage
 
 ```js

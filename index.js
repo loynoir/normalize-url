@@ -2,7 +2,26 @@
 const DATA_URL_DEFAULT_MIME_TYPE = 'text/plain';
 const DATA_URL_DEFAULT_CHARSET = 'us-ascii';
 
+// https://nodejs.org/api/url.html#url_special_schemes
+const URL_SPECIAL_PROTOCOL = /^(ftp:|file:|http:|https:|ws:|wss:)\/\//i;
+
 const testParameter = (name, filters) => filters.some(filter => filter instanceof RegExp ? filter.test(name) : filter === name);
+
+const reverseString = s => s.split('').reverse().join('');
+
+const pony$URLSearchParameters$sort = searchParameters => {
+	const ent = [...searchParameters.entries()];
+	if (ent.length === 0) {
+		const rnd = String(Math.random());
+		searchParameters.set(rnd, '');
+		searchParameters.delete(rnd);
+	} else {
+		for (const [k, v] of ent.sort()) {
+			searchParameters.delete(k);
+			searchParameters.set(k, v);
+		}
+	}
+};
 
 const normalizeDataURL = (urlString, {stripHash}) => {
 	const match = /^data:(?<type>[^,]*?),(?<data>[^#]*?)(?:#(?<hash>.*))?$/.exec(urlString);
@@ -70,8 +89,14 @@ export default function normalizeUrl(urlString, options) {
 		removeSingleSlash: true,
 		removeDirectoryIndex: false,
 		sortQueryParameters: true,
+		preferJsRegexpLookbehind: true,
+		preferURLSearchParamsSort: true,
 		...options,
 	};
+
+	if (options.forceHttp && options.forceHttps) {
+		throw new Error('The `forceHttp` and `forceHttps` options cannot be used together');
+	}
 
 	urlString = urlString.trim();
 
@@ -92,18 +117,30 @@ export default function normalizeUrl(urlString, options) {
 		urlString = urlString.replace(/^(?!(?:\w+:)?\/\/)|^\/\//, options.defaultProtocol);
 	}
 
-	const urlObject = new URL(urlString);
+	let isCustomProtocol = !URL_SPECIAL_PROTOCOL.test(urlString);
+	let customProtocol;
+	if (isCustomProtocol) {
+		customProtocol = urlString.split(':', 1)[0] + ':';
+		if (customProtocol) {
+			urlString = urlString.replace(customProtocol, options.defaultProtocol);
+		}
+	}
 
-	if (options.forceHttp && options.forceHttps) {
-		throw new Error('The `forceHttp` and `forceHttps` options cannot be used together');
+	let urlObject;
+	try {
+		urlObject = new URL(urlString);
+	} catch {
+		throw new Error(`Invalid URL: ${urlString}`);
 	}
 
 	if (options.forceHttp && urlObject.protocol === 'https:') {
 		urlObject.protocol = 'http:';
+		isCustomProtocol = false;
 	}
 
 	if (options.forceHttps && urlObject.protocol === 'http:') {
 		urlObject.protocol = 'https:';
+		isCustomProtocol = false;
 	}
 
 	// Remove auth
@@ -120,38 +157,36 @@ export default function normalizeUrl(urlString, options) {
 	}
 
 	// Remove duplicate slashes if not preceded by a protocol
-	// NOTE: This could be implemented using a single negative lookbehind
-	// regex, but we avoid that to maintain compatibility with older js engines
-	// which do not have support for that feature.
 	if (urlObject.pathname) {
-		// TODO: Replace everything below with `urlObject.pathname = urlObject.pathname.replace(/(?<!\b[a-z][a-z\d+\-.]{1,50}:)\/{2,}/g, '/');` when Safari supports negative lookbehind.
+		// https://caniuse.com/js-regexp-lookbehind
+		// prevent SyntaxError which can not be try-catch
 
-		// Split the string by occurrences of this protocol regex, and perform
-		// duplicate-slash replacement on the strings between those occurrences
-		// (if any).
-		const protocolRegex = /\b[a-z][a-z\d+\-.]{1,50}:\/\//g;
+		// DO NOT USE
+		// const REGEXP_DUPLICATE_SLASHES = /(?<!\b[a-z][a-z\d+\-.]{1,50}:)\/{2,}/g;
 
-		let lastIndex = 0;
-		let result = '';
-		for (;;) {
-			const match = protocolRegex.exec(urlObject.pathname);
-			if (!match) {
-				break;
-			}
+		// TODO: use babel plugin to auto generate
+		// REGEXP_DUPLICATE_SLASHES.source
+		const SREGEXP_DUPLICATE_SLASHES = '(?<!\\b[a-z][a-z\\d+\\-.]{1,50}:)\\/{2,}';
 
-			const protocol = match[0];
-			const protocolAtIndex = match.index;
-			const intermediate = urlObject.pathname.slice(lastIndex, protocolAtIndex);
+		const REVERSE_REGEXP_DUPLICATE_SLASHES = /\/{2,}(?!:[a-z\d+\-.]{1,50}[a-z]\b)/g;
 
-			result += intermediate.replace(/\/{2,}/g, '/');
-			result += protocol;
-			lastIndex = protocolAtIndex + protocol.length;
+		let needFallback = true;
+		if (options.preferJsRegexpLookbehind) {
+			try {
+				urlObject.pathname = urlObject.pathname.replace(
+					new RegExp(SREGEXP_DUPLICATE_SLASHES, 'g'),
+					'/',
+				);
+				needFallback = false;
+			} catch {}
 		}
 
-		const remnant = urlObject.pathname.slice(lastIndex, urlObject.pathname.length);
-		result += remnant.replace(/\/{2,}/g, '/');
-
-		urlObject.pathname = result;
+		if (needFallback) {
+			urlObject.pathname = reverseString(reverseString(urlObject.pathname).replace(
+				REVERSE_REGEXP_DUPLICATE_SLASHES,
+				'/',
+			));
+		}
 	}
 
 	// Decode URI octets
@@ -205,7 +240,18 @@ export default function normalizeUrl(urlString, options) {
 
 	// Sort query parameters
 	if (options.sortQueryParameters) {
-		urlObject.searchParams.sort();
+		let needFallback = true;
+
+		if (options.preferURLSearchParamsSort) {
+			try {
+				urlObject.searchParams.sort();
+				needFallback = false;
+			} catch {}
+		}
+
+		if (needFallback) {
+			pony$URLSearchParameters$sort(urlObject.searchParams);
+		}
 	}
 
 	if (options.removeTrailingSlash) {
@@ -216,6 +262,11 @@ export default function normalizeUrl(urlString, options) {
 
 	// Take advantage of many of the Node `url` normalizations
 	urlString = urlObject.toString();
+
+	// Changing protocol AFTER stringify prevent pathname got changed
+	if (isCustomProtocol && customProtocol) {
+		urlString = urlString.replace(urlObject.protocol, customProtocol);
+	}
 
 	if (!options.removeSingleSlash && urlObject.pathname === '/' && !oldUrlString.endsWith('/') && urlObject.hash === '') {
 		urlString = urlString.replace(/\/$/, '');
